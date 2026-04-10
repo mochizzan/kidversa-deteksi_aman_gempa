@@ -1,0 +1,28 @@
+# --- Python (Backend FastAPI) ---
+backend/__pycache__/
+backend/.venv/
+backend/venv/
+backend/env/
+backend/.env
+# Abaikan file model YOLO yang besar (opsional, jika >50MB wajib di-ignore)
+# backend/best.pt
+
+# --- Node/React (Frontend) ---
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+
+# --- OS & IDE Files ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.bak
