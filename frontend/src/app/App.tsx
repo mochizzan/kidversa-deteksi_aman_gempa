@@ -12,7 +12,7 @@ import {
 
 // Konfigurasi URL WebSocket Dinamis (Otomatis antara Lokal dan Production VPS)
 const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-const host = window.location.hostname === "localhost" ? "localhost:8000" : window.location.host;
+const host = window.location.hostname === "localhost" ? "localhost:8001" : window.location.host;
 const WS_URL = `${protocol}://${host}/ws`;
 
 type DetectionStatus = "idle" | "empty" | "safe" | "danger";

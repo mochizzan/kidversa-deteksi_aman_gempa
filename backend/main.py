@@ -39,15 +39,27 @@ active_connections = 0
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     global active_connections
-    await websocket.accept()
-    active_connections += 1
-    client_host = websocket.client.host
-    print(f"[WS] Connected: {client_host} | Aktif: {active_connections}")
+    client_host = "Unknown"
     
+    try:
+        await websocket.accept()
+        active_connections += 1
+        client_host = websocket.client.host
+        print(f"[WS] Connected: {client_host} | Aktif: {active_connections}")
+    except Exception as e:
+        print(f"[WS] Connection failed during handshake: {e}")
+        return
+
     try:
         while True:
             # 1. Terima data
-            data = await websocket.receive_text()
+            try:
+                data = await websocket.receive_text()
+            except WebSocketDisconnect:
+                break
+            except Exception:
+                break
+            
             start_time = time.time()
             
             try:
