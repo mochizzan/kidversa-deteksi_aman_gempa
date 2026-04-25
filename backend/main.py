@@ -20,90 +20,91 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+import time
+
 # =========================
 # LOAD MODEL
 # =========================
 # Dipastikan model di-load skali saja agar kencang
+print("[SYSTEM] Loading YOLO model...")
 model = YOLO("best.pt")
+print("[SYSTEM] Model loaded successfully")
 
 # =========================
 # WEBSOCKET ENDPOINT
 # =========================
+# Counter untuk memantau beban server
+active_connections = 0
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    global active_connections
     await websocket.accept()
-    print("Client connected to WebSocket")
+    active_connections += 1
+    client_host = websocket.client.host
+    print(f"[WS] Connected: {client_host} | Aktif: {active_connections}")
     
     try:
         while True:
-            # Terima data dari frontend (format: data:image/jpeg;base64,...)
+            # 1. Terima data
             data = await websocket.receive_text()
+            start_time = time.time()
             
             try:
-                # Cleaning base64 header jika ada
+                # 2. Decode Base64
                 if "," in data:
-                    header, encoded = data.split(",", 1)
+                    encoded = data.split(",", 1)[1]
                 else:
                     encoded = data
                 
-                # Decode base64 ke bytes
                 data_bytes = base64.b64decode(encoded)
-                
-                # Convert bytes ke format OpenCV img
                 nparr = np.frombuffer(data_bytes, np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
                 if frame is None:
-                    await websocket.send_text(json.dumps({"error": "frame is empty"}))
                     continue
 
-                # Run YOLO Inference (verbose=False agar log tidak penuh di VPS)
-                results = model(frame, verbose=False)
+                # 3. Identifikasi AI (Thread-safe & Non-blocking)
+                results = await asyncio.to_thread(model, frame, verbose=False)
                 
                 safe_count = 0
                 unsafe_count = 0
-                annotated_results = []
 
-                # Proses hasil deteksi
                 for r in results:
-                    boxes = r.boxes
-                    for box in boxes:
-                        cls = int(box.cls[0])
-                        label = model.names[cls]
-                        conf = float(box.conf[0])
-                        xyxy = box.xyxy[0].tolist() # Koordinat kotak [x1, y1, x2, y2]
-
+                    for box in r.boxes:
+                        label = model.names[int(box.cls[0])]
                         if label == "aman":
                             safe_count += 1
                         else:
                             unsafe_count += 1
-                        
-                        annotated_results.append({
-                            "label": label,
-                            "confidence": conf,
-                            "box": xyxy
-                        })
 
-                # Susun data untuk dikirim balik ke frontend
+                # 4. Gambar Box & Annotate
+                annotated_frame = await asyncio.to_thread(results[0].plot)
+                res_ret, res_buffer = cv2.imencode('.jpg', annotated_frame)
+                if not res_ret:
+                    continue
+                
+                res_base64 = base64.b64encode(res_buffer).decode('utf-8')
+
+                # 5. Send Back Response
                 response = {
                     "siswa_aman": safe_count,
                     "siswa_tidak_aman": unsafe_count,
                     "total": safe_count + unsafe_count,
-                    "detections": annotated_results
+                    "annotated_image": f"data:image/jpeg;base64,{res_base64}"
                 }
                 
-                # Kirim data ke frontend
                 await websocket.send_text(json.dumps(response))
 
             except Exception as e:
-                print(f"Error processing frame: {str(e)}")
-                await websocket.send_text(json.dumps({"error": "Failed to process frame"}))
+                print(f"[WS] Error Processing {client_host}: {str(e)}")
 
     except WebSocketDisconnect:
-        print("Client disconnected from WebSocket")
-    except Exception as e:
-        print(f"WebSocket Error: {str(e)}")
+        pass
+    finally:
+        active_connections -= 1
+        print(f"[WS] Disconnected: {client_host} | Sisa Aktif: {active_connections}")
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "model": "loaded"}
+    return {"status": "online", "active_users": active_connections}
