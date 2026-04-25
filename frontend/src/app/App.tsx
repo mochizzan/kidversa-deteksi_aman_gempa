@@ -25,26 +25,31 @@ export default function App() {
   const [status, setStatus] = useState<DetectionStatus>("idle");
   const [safeCount, setSafeCount] = useState(0);
   const [unsafeCount, setUnsafeCount] = useState(0);
+  const [aiImage, setAiImage] = useState<string | null>(null);
+  
+  const isDetectingRef = useRef(false);
 
   const totalCount = safeCount + unsafeCount;
 
-  // Mendapatkan akses kamera user
+  // 1. KENDALI KAMERA
   const startCamera = async () => {
+    console.log("[CAM] Meminta izin kamera...");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: 640, height: 480 },
       });
+      console.log("[CAM] Kamera OK");
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
       }
     } catch (err) {
-      console.error("Gagal mendapatkan akses kamera:", err);
-      alert("Harap izinkan akses kamera untuk mendeteksi posisi!");
+      console.error("[CAM] ERROR:", err);
+      alert("Gagal akses kamera! Pastikan izin diberikan.");
     }
   };
 
-  // Menghentikan kamera user
   const stopCamera = () => {
+    console.log("[CAM] Mematikan kamera...");
     if (videoRef.current && videoRef.current.srcObject) {
       const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
       tracks.forEach((track) => track.stop());
@@ -52,90 +57,105 @@ export default function App() {
     }
   };
 
-  // Fungsi untuk mengambil frame dari video dan mengirim ke WebSocket
+  // 2. KENDALI DATA (WEBSOCKET)
   const sendFrame = () => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    if (!videoRef.current || !canvasRef.current || !isDetecting) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        console.warn("[WS] Gagal kirim: Koneksi tidak terbuka");
+        return;
+    };
+    if (!videoRef.current || !canvasRef.current || !isDetectingRef.current) return;
 
     const canvas = canvasRef.current;
     const context = canvas.getContext("2d");
-    if (context && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
+    
+    // Siapkan gambar dari video
+    if (context && videoRef.current.readyState >= 2) {
       context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-      // Mengirimkan image dalam format JPEG (kualitas 0.6) untuk efisiensi bandwidth
       const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
+      
+      // Kirim ke backend
       wsRef.current.send(dataUrl);
+      // console.log("[WS] Frame Terkirim");
+    } else {
+      // Tunggu kamera ready
+      setTimeout(sendFrame, 100);
     }
   };
 
   const handleStartDetection = () => {
+    console.log("[APP] Memulai Deteksi...");
     setIsDetecting(true);
+    isDetectingRef.current = true;
     setStatus("empty");
     startCamera();
 
-    // Inisialisasi WebSocket
+    // Hubungkan ke Backend
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log("WebSocket Connected");
-      // Kirim frame pertama
-      sendFrame();
+      console.log("[WS] Terhubung ke Server");
+      // Kirim frame pertama setelah jeda singkat agar kamera stabil
+      setTimeout(sendFrame, 1000);
     };
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
 
       if (data.error) {
-        console.error("Server Error:", data.error);
-      } else {
-        const sAman = data.siswa_aman;
-        const sTidakAman = data.siswa_tidak_aman;
-        const sTotal = data.total;
-
-        setSafeCount(sAman);
-        setUnsafeCount(sTidakAman);
-
-        // KEMBALI KE LOGIKA ASLI: Danger jika Unsafe > Aman
-        if (sTotal === 0) {
-          setStatus("empty");
-        } else if (sTidakAman > sAman) {
-          setStatus("danger");
-        } else {
-          setStatus("safe");
-        }
+        console.error("[WS] Server Error:", data.error);
+        return;
       }
 
-      if (isDetecting) {
-        setTimeout(sendFrame, 100);
+      setSafeCount(data.siswa_aman);
+      setUnsafeCount(data.siswa_tidak_aman);
+      if (data.annotated_image) setAiImage(data.annotated_image);
+
+      const sTotal = data.total;
+      if (sTotal === 0) {
+        setStatus("empty");
+      } else if (data.siswa_tidak_aman > data.siswa_aman) {
+        setStatus("danger");
+      } else {
+        setStatus("safe");
+      }
+
+      // Loop pengiriman jika masih aktif
+      if (isDetectingRef.current) {
+        setTimeout(sendFrame, 30); // Kecepatan tinggi (30ms per frame)
       }
     };
 
     ws.onclose = () => {
-      console.log("WebSocket Disconnected");
+      console.warn("[WS] Terputus dari Server");
+      handleStopDetection(); // Matikan kamera otomatis jika koneksi putus (sesuai request user)
     };
 
     ws.onerror = (err) => {
-      console.error("WebSocket Error:", err);
+      console.error("[WS] Koneksi Error:", err);
     };
   };
 
   const handleStopDetection = () => {
+    console.log("[APP] Menghentikan Deteksi...");
     setIsDetecting(false);
+    isDetectingRef.current = false;
     setStatus("idle");
     setSafeCount(0);
     setUnsafeCount(0);
+    setAiImage(null);
     stopCamera();
     if (wsRef.current) {
       wsRef.current.close();
+      wsRef.current = null;
     }
   };
 
   useEffect(() => {
     return () => {
+      isDetectingRef.current = false;
+      if (wsRef.current) wsRef.current.close();
       stopCamera();
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
     };
   }, []);
 
@@ -210,7 +230,7 @@ export default function App() {
               <div className="absolute top-6 left-6 z-10 flex items-center gap-2 bg-black/40 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10">
                 <Video className="w-4 h-4 text-white" />
                 <span className="text-white text-xs font-semibold tracking-wider">
-                  LOCAL CAMERA
+                  AI DETECTION FEED
                 </span>
               </div>
 
@@ -233,11 +253,25 @@ export default function App() {
                     : "border-slate-300"
                 }`}
               >
+                {isDetecting ? (
+                  <img
+                    src={aiImage || ""}
+                    alt="AI Tracking Feed"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="flex flex-col items-center justify-center text-slate-500 gap-4 p-6">
+                    <Video className="w-16 h-16 opacity-20" />
+                    <p className="font-medium text-lg">Kamera tidak aktif</p>
+                  </div>
+                )}
+                
+                {/* Video asli tetap ada tapi disembunyikan (hidden) */}
                 <video
                   ref={videoRef}
                   autoPlay
                   playsInline
-                  className={`w-full h-full object-cover ${!isDetecting ? "hidden" : ""}`}
+                  className="hidden"
                 />
                 
                 {/* Canvas Tersembunyi untuk Capture */}
@@ -247,13 +281,6 @@ export default function App() {
                   height="480" 
                   className="hidden" 
                 />
-
-                {!isDetecting && (
-                  <div className="flex flex-col items-center justify-center text-slate-500 gap-4 p-6">
-                    <Video className="w-16 h-16 opacity-20" />
-                    <p className="font-medium text-lg">Kamera tidak aktif</p>
-                  </div>
-                )}
               </div>
             </div>
 
