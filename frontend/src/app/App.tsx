@@ -10,22 +10,113 @@ import {
   ArrowLeft,
 } from "lucide-react";
 
-const URL = "http://localhost:8000/";
+// Ubah URL sesuai dengan alamat backend di VPS nanti
+// Jika menjalankan lokal di browser, gunakan ws:// localhost atau IP server
+const WS_URL = "ws://localhost:8000/ws";
 
 type DetectionStatus = "idle" | "empty" | "safe" | "danger";
 
 export default function App() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+
   const [isDetecting, setIsDetecting] = useState(false);
   const [status, setStatus] = useState<DetectionStatus>("idle");
   const [safeCount, setSafeCount] = useState(0);
   const [unsafeCount, setUnsafeCount] = useState(0);
 
-  const intervalId = useRef<number>(0);
   const totalCount = safeCount + unsafeCount;
+
+  // Mendapatkan akses kamera user
+  const startCamera = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480 },
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+    } catch (err) {
+      console.error("Gagal mendapatkan akses kamera:", err);
+      alert("Harap izinkan akses kamera untuk mendeteksi posisi!");
+    }
+  };
+
+  // Menghentikan kamera user
+  const stopCamera = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
+      tracks.forEach((track) => track.stop());
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  // Fungsi untuk mengambil frame dari video dan mengirim ke WebSocket
+  const sendFrame = () => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (!videoRef.current || !canvasRef.current || !isDetecting) return;
+
+    const canvas = canvasRef.current;
+    const context = canvas.getContext("2d");
+    if (context && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
+      context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+      // Mengirimkan image dalam format JPEG (kualitas 0.6) untuk efisiensi bandwidth
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.6);
+      wsRef.current.send(dataUrl);
+    }
+  };
 
   const handleStartDetection = () => {
     setIsDetecting(true);
     setStatus("empty");
+    startCamera();
+
+    // Inisialisasi WebSocket
+    const ws = new WebSocket(WS_URL);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      console.log("WebSocket Connected");
+      // Kirim frame pertama
+      sendFrame();
+    };
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+
+      if (data.error) {
+        console.error("Server Error:", data.error);
+      } else {
+        const sAman = data.siswa_aman;
+        const sTidakAman = data.siswa_tidak_aman;
+        const sTotal = data.total;
+
+        setSafeCount(sAman);
+        setUnsafeCount(sTidakAman);
+
+        // KEMBALI KE LOGIKA ASLI: Danger jika Unsafe > Aman
+        if (sTotal === 0) {
+          setStatus("empty");
+        } else if (sTidakAman > sAman) {
+          setStatus("danger");
+        } else {
+          setStatus("safe");
+        }
+      }
+
+      if (isDetecting) {
+        setTimeout(sendFrame, 100);
+      }
+    };
+
+    ws.onclose = () => {
+      console.log("WebSocket Disconnected");
+    };
+
+    ws.onerror = (err) => {
+      console.error("WebSocket Error:", err);
+    };
   };
 
   const handleStopDetection = () => {
@@ -33,61 +124,20 @@ export default function App() {
     setStatus("idle");
     setSafeCount(0);
     setUnsafeCount(0);
-    if ((window as any).detectionInterval) {
-      clearInterval((window as any).detectionInterval);
-    }
-  };
-
-  const handleGetData = async () => {
-    try {
-      const res = await fetch(`${URL}cam_data`);
-      const rd = await res.json();
-      const camData = rd.sent_data;
-
-      setSafeCount(camData.siswa_aman);
-      setUnsafeCount(camData.siswa_tidak_aman);
-
-      return {
-        safeCount: camData.siswa_aman,
-        unsafeCount: camData.siswa_tidak_aman,
-      };
-    } catch (error) {
-      console.error(error);
-      return { safeCount: 0, unsafeCount: 0 };
-    }
-  };
-
-  const handleStatusSafe = (data: {
-    safeCount: number;
-    unsafeCount: number;
-  }) => {
-    const totalDetect = data.safeCount + data.unsafeCount;
-
-    if (totalDetect === 0) {
-      setStatus("empty");
-    } else if (data.unsafeCount > data.safeCount) {
-      setStatus("danger");
-    } else {
-      setStatus("safe");
+    stopCamera();
+    if (wsRef.current) {
+      wsRef.current.close();
     }
   };
 
   useEffect(() => {
-    if (isDetecting) {
-      const _intervalId = window.setInterval(() => {
-        handleGetData().then((data) => {
-          handleStatusSafe(data);
-        });
-      }, 500);
-      intervalId.current = _intervalId;
-    } else {
-      clearInterval(intervalId.current);
-    }
-
     return () => {
-      clearInterval(intervalId.current);
+      stopCamera();
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
     };
-  }, [isDetecting]);
+  }, []);
 
   // Fungsi untuk mengatur warna border wadah kamera saja
   const getCameraGlow = () => {
@@ -98,7 +148,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#f8fafc] font-sans selection:bg-blue-200">
-      {/* Tambahkan Style Tag untuk Custom Ambient Light Keyframes */}
       <style>
         {`
           @keyframes pulsing-ambient-light-red {
@@ -136,7 +185,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Tombol Kembali ke Halaman Login/Menu Utama */}
           <a href="https://app.kidversa.fun/admin/index">
             <button className="flex items-center gap-2 text-slate-500 hover:text-blue-600 font-semibold group p-1 transition-colors duration-200">
               <ArrowLeft className="w-5 h-5 text-slate-400 group-hover:text-blue-500 transition-colors duration-200" />
@@ -150,7 +198,6 @@ export default function App() {
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
           {/* CAMERA SECTION (Kiri) */}
           <div className="xl:col-span-2 flex flex-col gap-6">
-            {/* Ambient Light Wrapper (diperbarui untuk efek cahaya sekitar yang benar) */}
             <div
               className={`relative rounded-3xl p-1.5 transition-all duration-700 bg-white border ${getCameraGlow()} ${
                 status === "danger"
@@ -163,7 +210,7 @@ export default function App() {
               <div className="absolute top-6 left-6 z-10 flex items-center gap-2 bg-black/40 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10">
                 <Video className="w-4 h-4 text-white" />
                 <span className="text-white text-xs font-semibold tracking-wider">
-                  LIVE FEED
+                  LOCAL CAMERA
                 </span>
               </div>
 
@@ -171,12 +218,12 @@ export default function App() {
                 <div className="absolute top-6 right-6 z-10 flex items-center gap-2 bg-red-500/90 backdrop-blur-md px-3 py-1.5 rounded-full shadow-lg">
                   <div className="w-2 h-2 bg-white rounded-full animate-ping"></div>
                   <span className="text-white text-xs font-bold tracking-widest">
-                    REC
+                    SYSTEM ACTIVE
                   </span>
                 </div>
               )}
 
-              {/* Video Frame: Dibuat benar-benar static, radius diperbaiki, dan memiliki border warna static */}
+              {/* Video Container */}
               <div
                 className={`bg-slate-900 rounded-[1.25rem] overflow-hidden aspect-video relative flex items-center justify-center border-4 ${
                   status === "danger"
@@ -186,31 +233,31 @@ export default function App() {
                     : "border-slate-300"
                 }`}
               >
-                {isDetecting ? (
-                  <img
-                    src={`${URL}video_feed`}
-                    alt="AI Camera Feed"
-                    className="w-full h-full object-cover"
-                  />
-                ) : (
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  className={`w-full h-full object-cover ${!isDetecting ? "hidden" : ""}`}
+                />
+                
+                {/* Canvas Tersembunyi untuk Capture */}
+                <canvas 
+                  ref={canvasRef} 
+                  width="640" 
+                  height="480" 
+                  className="hidden" 
+                />
+
+                {!isDetecting && (
                   <div className="flex flex-col items-center justify-center text-slate-500 gap-4 p-6">
                     <Video className="w-16 h-16 opacity-20" />
                     <p className="font-medium text-lg">Kamera tidak aktif</p>
                   </div>
                 )}
-
-                {/* Overlay teks info jika kamera tidak aktif (statis) */}
-                {!isDetecting && status === "idle" && (
-                  <div className="absolute inset-x-0 bottom-4 text-center px-4">
-                    <p className="text-sm text-slate-400 bg-black/60 backdrop-blur-sm px-3 py-1.5 rounded-full inline-block">
-                      Klik Mulai untuk melihat kamera.
-                    </p>
-                  </div>
-                )}
               </div>
             </div>
 
-            {/* Tombol Kontrol Modern */}
+            {/* Tombol Kontrol */}
             <div className="flex gap-4">
               <button
                 onClick={handleStartDetection}
@@ -240,9 +287,8 @@ export default function App() {
             </div>
           </div>
 
-          {/* DASHBOARD SECTION (Kanan) */}
+          {/* DASHBOARD SECTION */}
           <div className="flex flex-col gap-6">
-            {/* Status Card Utama (Sangat Visual untuk Anak) */}
             <div
               className={`bg-white rounded-3xl p-8 shadow-xl border-t-4 transition-all duration-500 flex flex-col items-center text-center ${
                 status === "danger"
@@ -276,7 +322,7 @@ export default function App() {
                     Aman
                   </h2>
                   <p className="text-slate-600 font-bold mt-2">
-                    Tidak ada orang terdeteksi
+                    Kamera aktif, menunggu objek...
                   </p>
                 </>
               )}
@@ -291,7 +337,7 @@ export default function App() {
                     Sangat Baik!
                   </h2>
                   <p className="text-slate-600 font-bold mt-2">
-                    Posisi berlindung sudah benar
+                    Semua anak dalam posisi aman
                   </p>
                 </>
               )}
@@ -312,7 +358,6 @@ export default function App() {
               )}
             </div>
 
-            {/* Statistik Detail dengan Progress Bar */}
             <div className="bg-white/80 backdrop-blur-xl rounded-3xl p-6 shadow-lg border border-white/50 flex-1">
               <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center gap-2 pb-2 border-b border-slate-100">
                 <Users className="w-5 h-5 text-blue-500" />
@@ -320,7 +365,6 @@ export default function App() {
               </h3>
 
               <div className="space-y-6">
-                {/* Safe Bar */}
                 <div>
                   <div className="flex justify-between items-end mb-2">
                     <span className="font-semibold text-emerald-600 flex items-center gap-2">
@@ -343,7 +387,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Unsafe Bar */}
                 <div>
                   <div className="flex justify-between items-end mb-2">
                     <span className="font-semibold text-red-500 flex items-center gap-2">

@@ -1,11 +1,11 @@
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import threading
 import cv2
+import numpy as np
+import base64
 from ultralytics import YOLO
-import requests
-import atexit
+import json
+import asyncio
 
 app = FastAPI()
 
@@ -23,122 +23,87 @@ app.add_middleware(
 # =========================
 # LOAD MODEL
 # =========================
+# Dipastikan model di-load skali saja agar kencang
 model = YOLO("best.pt")
 
 # =========================
-# OPEN WEBCAM
+# WEBSOCKET ENDPOINT
 # =========================
-cap = cv2.VideoCapture(0)
-
-# =========================
-# GLOBAL VARIABLES
-# =========================
-safe_count = 0
-unsafe_count = 0
-total_anak = 0
-
-# =========================
-# BACKGROUND DETECTION
-# =========================
-def run_detection():
-    global safe_count, unsafe_count, total_anak
-
-    while True:
-        success, frame = cap.read()
-
-        if not success:
-            continue
-
-        results = model(frame)
-
-# =========================
-# GENERATE VIDEO STREAM
-# =========================
-def generate_frames():
-    global safe_count, unsafe_count, total_anak
-
-    while True:
-        success, frame = cap.read()
-
-        if not success:
-            break
-
-        results = model(frame)
-
-        safe_count = 0
-        unsafe_count = 0
-
-        for r in results:
-            boxes = r.boxes
-
-            for box in boxes:
-                cls = int(box.cls[0])
-                label = model.names[cls]
-
-                if label == "aman":
-                    safe_count += 1
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    print("Client connected to WebSocket")
+    
+    try:
+        while True:
+            # Terima data dari frontend (format: data:image/jpeg;base64,...)
+            data = await websocket.receive_text()
+            
+            try:
+                # Cleaning base64 header jika ada
+                if "," in data:
+                    header, encoded = data.split(",", 1)
                 else:
-                    unsafe_count += 1
+                    encoded = data
+                
+                # Decode base64 ke bytes
+                data_bytes = base64.b64decode(encoded)
+                
+                # Convert bytes ke format OpenCV img
+                nparr = np.frombuffer(data_bytes, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        total_anak = safe_count + unsafe_count
+                if frame is None:
+                    await websocket.send_text(json.dumps({"error": "frame is empty"}))
+                    continue
 
-        if total_anak > 0:
-            kesiapsiagaan = (safe_count / total_anak) * 100
-        else:
-            kesiapsiagaan = 0
+                # Run YOLO Inference (verbose=False agar log tidak penuh di VPS)
+                results = model(frame, verbose=False)
+                
+                safe_count = 0
+                unsafe_count = 0
+                annotated_results = []
 
-        annotated_frame = results[0].plot()
+                # Proses hasil deteksi
+                for r in results:
+                    boxes = r.boxes
+                    for box in boxes:
+                        cls = int(box.cls[0])
+                        label = model.names[cls]
+                        conf = float(box.conf[0])
+                        xyxy = box.xyxy[0].tolist() # Koordinat kotak [x1, y1, x2, y2]
 
-        # encode frame ke jpeg
-        ret, buffer = cv2.imencode('.jpg', annotated_frame)
-        frame = buffer.tobytes()
+                        if label == "aman":
+                            safe_count += 1
+                        else:
+                            unsafe_count += 1
+                        
+                        annotated_results.append({
+                            "label": label,
+                            "confidence": conf,
+                            "box": xyxy
+                        })
 
-        yield (
-            b'--frame\r\n'
-            b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
-        )
+                # Susun data untuk dikirim balik ke frontend
+                response = {
+                    "siswa_aman": safe_count,
+                    "siswa_tidak_aman": unsafe_count,
+                    "total": safe_count + unsafe_count,
+                    "detections": annotated_results
+                }
+                
+                # Kirim data ke frontend
+                await websocket.send_text(json.dumps(response))
 
+            except Exception as e:
+                print(f"Error processing frame: {str(e)}")
+                await websocket.send_text(json.dumps({"error": "Failed to process frame"}))
 
-# =========================
-# STREAM ENDPOINT
-# =========================
-@app.get("/video_feed")
-def video_feed():
-    return StreamingResponse(
-        generate_frames(),
-        media_type="multipart/x-mixed-replace; boundary=frame"
-    )
+    except WebSocketDisconnect:
+        print("Client disconnected from WebSocket")
+    except Exception as e:
+        print(f"WebSocket Error: {str(e)}")
 
-
-# =========================
-# SEND DATA TO RAILS
-# =========================
-@app.get("/cam_data")
-def cam_data():
-    global safe_count, unsafe_count, total_anak
-
-    data = {
-        "siswa_aman": safe_count,
-        "siswa_tidak_aman": unsafe_count,
-        "total": total_anak
-    }
-
-    return {
-        "status": "success",
-        "sent_data": data
-    }
-
-# =========================
-# START BACKGROUND THREAD
-# =========================
-threading.Thread(target=run_detection, daemon=True).start()
-
-# =========================
-# CLEANUP CAMERA
-# =========================
-def release_camera():
-    if cap.isOpened():
-        cap.release()
-        print("Camera released")
-
-atexit.register(release_camera)
+@app.get("/")
+def health_check():
+    return {"status": "online", "model": "loaded"}
