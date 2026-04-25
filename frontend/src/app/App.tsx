@@ -10,9 +10,10 @@ import {
   ArrowLeft,
 } from "lucide-react";
 
-// Ubah URL sesuai dengan alamat backend di VPS nanti
-// Jika menjalankan lokal di browser, gunakan ws:// localhost atau IP server
-const WS_URL = "ws://localhost:8000/ws";
+// Konfigurasi URL WebSocket Dinamis (Otomatis antara Lokal dan Production VPS)
+const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+const host = window.location.hostname === "localhost" ? "localhost:8000" : window.location.host;
+const WS_URL = `${protocol}://${host}/ws`;
 
 type DetectionStatus = "idle" | "empty" | "safe" | "danger";
 
